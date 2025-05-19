@@ -29,7 +29,7 @@ use helix_view::{
     graphics::{Color, CursorKind, Modifier, Rect, Style},
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
-    Document, Editor, Theme, View,
+    Document, DocumentId, Editor, Theme, View,
 };
 use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
 
@@ -42,6 +42,7 @@ pub struct EditorView {
     pub(crate) last_insert: (commands::MappableCommand, Vec<InsertEvent>),
     pub(crate) completion: Option<Completion>,
     spinners: ProgressSpinners,
+    bufferline_widgets: Vec<BufferLineWidget>,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
 }
@@ -57,6 +58,18 @@ pub enum InsertEvent {
     RequestCompletion,
 }
 
+#[derive(Debug)]
+struct BufferLineWidget {
+    columns: std::ops::Range<u16>,
+    document_id: DocumentId,
+}
+
+impl BufferLineWidget {
+    fn get_clicked(widgets: &[Self], column: u16) -> Option<&BufferLineWidget> {
+        widgets.iter().find(|w| w.columns.contains(&column))
+    }
+}
+
 impl EditorView {
     pub fn new(keymaps: Keymaps) -> Self {
         Self {
@@ -66,6 +79,7 @@ impl EditorView {
             last_insert: (commands::MappableCommand::normal_mode, Vec::new()),
             completion: None,
             spinners: ProgressSpinners::default(),
+            bufferline_widgets: Vec::new(),
             terminal_focused: true,
         }
     }
@@ -559,7 +573,9 @@ impl EditorView {
     }
 
     /// Render bufferline at the top
-    pub fn render_bufferline(editor: &Editor, viewport: Rect, surface: &mut Surface) {
+    pub fn render_bufferline(&mut self, editor: &Editor, viewport: Rect, surface: &mut Surface) {
+        self.bufferline_widgets.clear();
+
         let scratch = PathBuf::from(SCRATCH_BUFFER_NAME); // default filename to use for scratch buffer
         surface.clear_with(
             viewport,
@@ -600,6 +616,11 @@ impl EditorView {
             let text = format!(" {}{} ", fname, if doc.is_modified() { "[+]" } else { "" });
             let used_width = viewport.x.saturating_sub(x);
             let rem_width = surface.area.width.saturating_sub(used_width);
+
+            self.bufferline_widgets.push(BufferLineWidget {
+                columns: x..x + text.len() as u16,
+                document_id: doc.id(),
+            });
 
             x = surface
                 .set_stringn(x, viewport.y, text, rem_width as usize, style)
@@ -1125,6 +1146,16 @@ impl EditorView {
             MouseEventKind::Down(MouseButton::Left) => {
                 let editor = &mut cxt.editor;
 
+                if is_bufferline_visible(editor) && row == 0 {
+                    if let Some(widget) =
+                        BufferLineWidget::get_clicked(&self.bufferline_widgets[..], column)
+                    {
+                        editor.switch(widget.document_id, helix_view::editor::Action::Replace);
+                    }
+
+                    return EventResult::Consumed(None);
+                }
+
                 if let Some((pos, view_id)) = pos_and_view(editor, row, column, true) {
                     let prev_view_id = view!(editor).id;
                     let doc = doc_mut!(editor, &view!(editor, view_id).doc);
@@ -1494,12 +1525,7 @@ impl Component for EditorView {
         let config = cx.editor.config();
 
         // check if bufferline should be rendered
-        use helix_view::editor::BufferLine;
-        let use_bufferline = match config.bufferline {
-            BufferLine::Always => true,
-            BufferLine::Multiple if cx.editor.documents.len() > 1 => true,
-            _ => false,
-        };
+        let use_bufferline = is_bufferline_visible(cx.editor);
 
         // -1 for commandline and -1 for bufferline
         let mut editor_area = area.clip_bottom(1);
@@ -1511,7 +1537,7 @@ impl Component for EditorView {
         cx.editor.resize(editor_area);
 
         if use_bufferline {
-            Self::render_bufferline(cx.editor, area.with_height(1), surface);
+            self.render_bufferline(cx.editor, area.with_height(1), surface);
         }
 
         for (view, is_focused) in cx.editor.tree.views() {
@@ -1603,6 +1629,17 @@ impl Component for EditorView {
             }
             cursor => cursor,
         }
+    }
+}
+
+fn is_bufferline_visible(editor: &Editor) -> bool {
+    use helix_view::editor::BufferLine;
+    let config = editor.config();
+
+    match config.bufferline {
+        BufferLine::Always => true,
+        BufferLine::Multiple if editor.documents.len() > 1 => true,
+        _ => false,
     }
 }
 
